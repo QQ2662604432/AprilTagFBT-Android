@@ -39,7 +39,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         btnSettings.setOnClickListener {
-            Toast.makeText(this, "设置界面开发中", Toast.LENGTH_SHORT).show()
+            startActivity(android.content.Intent(this, SettingsActivity::class.java))
         }
 
         // 初始化 native

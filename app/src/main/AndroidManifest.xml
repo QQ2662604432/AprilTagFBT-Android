@@ -32,6 +32,17 @@
             android:exported="false"
             android:screenOrientation="landscape"
             android:configChanges="orientation|keyboardHidden|screenSize" />
+
+        <activity
+            android:name=".SettingsActivity"
+            android:exported="false"
+            android:screenOrientation="portrait" />
+
+        <activity
+            android:name=".CalibrationActivity"
+            android:exported="false"
+            android:screenOrientation="landscape" />
+
     </application>
 
 </manifest>
