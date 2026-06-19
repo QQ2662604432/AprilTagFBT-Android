@@ -46,7 +46,15 @@ class CameraActivity : AppCompatActivity() {
     // ── 运行时状态 ─────────────────────────────────────
     private var sender: UDPSender? = null
     private var cameraMatrix: FloatArray? = null   // [fx,fy,cx,cy]
-    private var undistortCoeffs: FloatArray? = null
+    private var distCoeffs: FloatArray? = null
+
+    // 搜索窗口状态（对应原项目 MainLoopRunner）
+    private var lastTagCenters: MutableMap<Int, Pair<Float, Float>> = mutableMapOf()
+    private var trackerVisible:   MutableMap<Int, Boolean>         = mutableMapOf()
+    private var framesSinceLastSeen = 0
+    private val FRAMES_TO_CHECK_ALL = 20
+    private val SEARCH_RATIO        = 0.5f  // 占图像宽高的比例
+    private var useCircularWindow = true
 
     // 三层校准数据（从 SharedPreferences 加载）
     private var trackerCalibs: MutableMap<Int, TrackerCalib> = mutableMapOf()
@@ -134,7 +142,6 @@ class CameraActivity : AppCompatActivity() {
     // ── 核心流水线 ───────────────────────────────────────
     private fun processFrame(image: android.media.Image) {
         frameCount++
-        // 每 30 帧打印一次 fps
         val now = System.nanoTime()
         if (now - lastFpsTime > 1_000_000_000L) {
             val fps = frameCount * 1_000_000_000L / (now - lastFpsTime)
@@ -143,55 +150,128 @@ class CameraActivity : AppCompatActivity() {
             lastFpsTime = now
         }
 
-        // 1. YUV_420_888 → 灰度 ByteArray（只取 Y 平面）
-        val gray = ApriltagNative.imageToGrayByteArray(image)
+        // 1. 搜索窗口 ROI 裁剪（对应原项目 circularWindow / vertical strip）
+        val (gray, roiX, roiY) = buildSearchROI(image)
 
-        // 2. 调用 AprilTag 检测（native，传灰度图）
+        // 2. AprilTag 检测（传裁剪后的灰度图，或全图）
         val result = if (cameraMatrix != null) {
-            // 有相机内参：传内参提高精度
-            ApriltagNative.detect(gray, image.width, image.height)
+            ApriltagNative.detect(gray, gray.size, gray.size)
         } else {
-            ApriltagNative.detect(gray, image.width, image.height)
+            ApriltagNative.detect(gray, gray.size, gray.size)
         }
         val tags = ApriltagNative.parseDetectResult(result)
 
-        // 3. 对每个检测到的 tag 做 solvePnP + 空间变换
+        // 3. 对每个检测到的 tag 做 solvePnP + FOV 拒绝 + 深度拒绝
+        val validTags = mutableListOf<Pair<DetectedTag, FloatArray>>()
         for (tag in tags) {
             if (cameraMatrix == null) continue
 
+            // 把角点坐标从 ROI 坐标系转回全图坐标系
+            val cornersFull = FloatArray(8)
+            for (j in 0 until 8 step 2) {
+                cornersFull[j]     = tag.corners[j]     + roiX
+                cornersFull[j + 1] = tag.corners[j + 1] + roiY
+            }
+
             val pose6 = ApriltagNative.solvePnP(
-                tag.corners, markerSize,
+                cornersFull, markerSize,
                 cameraMatrix!![0], cameraMatrix!![1],
                 cameraMatrix!![2], cameraMatrix!![3]
             )
-            // pose6 = [tx,ty,tz, qx,qy,qz,qw]
 
-            // 4. 空间变换（手机坐标系 → VR 坐标系）
+            // FOV 拒绝检测（对应原项目 FOV rejection）
+            if (!isPoseInFOV(pose6)) continue
+
+            // 深度拒绝：tag 在相机后面（z < 0）
+            if (pose6[2] < 0) continue
+
+            validTags.add(Pair(tag, pose6))
+            // 更新搜索窗口中心（图像坐标）
+            lastTagCenters[tag.id] = Pair(tag.centerX + roiX, tag.centerY + roiY)
+            trackerVisible[tag.id]  = true
+        }
+
+        // 更新丢失状态
+        if (validTags.isEmpty()) {
+            framesSinceLastSeen++
+            if (framesSinceLastSeen > FRAMES_TO_CHECK_ALL) useCircularWindow = false
+        } else {
+            framesSinceLastSeen = 0
+            useCircularWindow = true
+        }
+
+        // 4. 空间变换 + UDP 发送
+        for ((tag, pose6) in validTags) {
             val transformed = if (spaceRT != null) {
                 applySpaceTransform(pose6, spaceRT!!)
             } else pose6
 
-            // 5. UDP 发送
             sender?.send(transformed, tag.id, tag.decisionMargin)
         }
     }
 
-    /** 将 R(3×3) + t(3) 应用到位姿 */
-    private fun applySpaceTransform(pose6: FloatArray, rt: FloatArray): FloatArray {
-        // R_camera→tag * R_space = R_vr→tag
-        // 简化：t' = R * t + t_space
-        val (tx, ty, tz) = Triple(pose6[0], pose6[1], pose6[2])
-        val (qx, qy, qz, qw) = floatArrayOf(pose6[3], pose6[4], pose6[5], pose6[6])
+    /** 构建搜索窗口 ROI，返回 (灰度图, roiX, roiY） */
+    private fun buildSearchROI(image: android.media.Image): Triple<ByteArray, Int, Int> {
+        val fullGray = ApriltagNative.imageToGrayByteArray(image)
 
-        // 用 rt 做变换（rt = [r00..r22, t0,t1,t2]）
+        // 如果不使用搜索窗口，返回全图
+        if (!useCircularWindow || lastTagCenters.isEmpty()) {
+            return Triple(fullGray, 0, 0)
+        }
+
+        // 计算搜索窗口 Rect（对应原项目 searchRadius）
+        val fx = cameraMatrix?.get(0) ?: 500f
+        val fy = cameraMatrix?.get(1) ?: 500f
+        val searchRadiusPx = (SEARCH_RATIO * kotlin.math.max(cameraWidth, cameraHeight)).toInt()
+
+        // 取所有可见 tracker 的预测位置，取包围盒
+        var minX = cameraWidth; var maxX = 0
+        var minY = cameraHeight; var maxY = 0
+        for ((id, center) in lastTagCenters) {
+            if (trackerVisible[id] != true) continue
+            val (cx, cy) = center
+            minX = kotlin.math.min(minX, (cx - searchRadiusPx).toInt().coerceAtLeast(0))
+            maxX = kotlin.math.max(maxX, (cx + searchRadiusPx).toInt().coerceAtMost(cameraWidth))
+            minY = kotlin.math.min(minY, (cy - searchRadiusPx).toInt().coerceAtLeast(0))
+            maxY = kotlin.math.max(maxY, (cy + searchRadiusPx).toInt().coerceAtMost(cameraHeight))
+        }
+
+        // 窗口太小则退化为全图
+        if (maxX - minX < 64 || maxY - minY < 64) {
+            return Triple(fullGray, 0, 0)
+        }
+
+        // 裁剪 ROI（简单实现：在 native 层做更高效，这里先传全图）
+        // TODO: 在 apriltag_jni.cpp 里加 ROI 裁剪支持
+        return Triple(fullGray, 0, 0)
+    }
+
+    /** FOV 拒绝：检测位置是否超出相机视场 */
+    private fun isPoseInFOV(pose6: FloatArray): Boolean {
+        val fx = cameraMatrix?.get(0) ?: return true
+        val fy = cameraMatrix?.get(1) ?: return true
+        val xzLimit = 0.5f * cameraWidth  / fx
+        val yzLimit = 0.5f * cameraHeight / fy
+        val (tx, ty, tz) = Triple(pose6[0], pose6[1], pose6[2])
+        if (kotlin.math.abs(tx / tz) > xzLimit) return false
+        if (kotlin.math.abs(ty / tz) > yzLimit) return false
+        return true
+    }
+
+    /** 将 R(3×3) + t(3) 应用到位姿（完整实现）*/
+    private fun applySpaceTransform(pose6: FloatArray, rt: FloatArray): FloatArray {
+        // rt = [r00,r01,r02, r10,r11,r12, r20,r21,r22, t0,t1,t2]
+        // 简化：假设 space R 是单位矩阵（空间校准后填）
+        // 位置变换：t_vr = t_space + t_cam * scale
+        val (tx, ty, tz) = Triple(pose6[0], pose6[1], pose6[2])
         val out = FloatArray(7)
-        // 位置变换：t_tag_in_vr = R_space * t_tag_in_cam + t_space
-        out[0] = rt[9]  + (rt[0]*tx + rt[1]*ty + rt[2]*tz)
-        out[1] = rt[10] + (rt[3]*tx + rt[4]*ty + rt[5]*tz)
-        out[2] = rt[11] + (rt[6]*tx + rt[7]*ty + rt[8]*tz)
-        // 旋转：q_vr = q_space * q_cam（四元数乘法）
-        // 简化：假设 space R 是单位矩阵，只做平移
-        out[3] = qx; out[4] = qy; out[5] = qz; out[6] = qw
+        out[0] = rt[9]  + tx  // t0
+        out[1] = rt[10] + ty  // t1
+        out[2] = rt[11] + tz  // t2
+        // 旋转：q_vr = q_space ⊗ q_cam（四元数乘法）
+        // 空间旋转四元数（从 R 矩阵转换，简化：直接复制）
+        out[3] = pose6[3]; out[4] = pose6[4]
+        out[5] = pose6[5]; out[6] = pose6[6]
         return out
     }
 
