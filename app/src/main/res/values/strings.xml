@@ -1,0 +1,7 @@
+<resources>
+    <string name="app_name">AprilTag FBT</string>
+    <string name="btn_start">启动追踪</string>
+    <string name="btn_settings">设置</string>
+    <string name="status_stopped">状态：已停止</string>
+    <string name="status_tracking">状态：追踪中</string>
+</resources>

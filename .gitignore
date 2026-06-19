@@ -1,0 +1,17 @@
+# Android
+*.apk
+*.ap_
+*.dex
+*.class
+*.modulemap
+*.iml
+.gradle/
+/local.properties
+/.idea/
+/build/
+/captures/
+.externalNativeBuild/
+.cxx/
+
+# so 二进制文件（体积大，可选是否提交）
+# app/src/main/jniLibs/

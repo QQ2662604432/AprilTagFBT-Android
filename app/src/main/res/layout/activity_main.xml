@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:gravity="center"
+    android:padding="32dp"
+    android:background="#1a1a1a">
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="AprilTag FBT"
+        android:textSize="28sp"
+        android:textColor="#ffffff"
+        android:layout_marginBottom="48dp" />
+
+    <TextView
+        android:id="@+id/status_text"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="状态：未启动"
+        android:textSize="18sp"
+        android:textColor="#cccccc"
+        android:layout_marginBottom="32dp" />
+
+    <Button
+        android:id="@+id/btn_start"
+        android:layout_width="match_parent"
+        android:layout_height="64dp"
+        android:text="@string/btn_start"
+        android:textSize="20sp"
+        android:backgroundTint="#2196F3"
+        android:layout_marginBottom="16dp" />
+
+    <Button
+        android:id="@+id/btn_settings"
+        android:layout_width="match_parent"
+        android:layout_height="64dp"
+        android:text="@string/btn_settings"
+        android:textSize="20sp"
+        android:backgroundTint="#444444" />
+
+</LinearLayout>
